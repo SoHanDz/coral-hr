@@ -1,8 +1,8 @@
 import axios, { AxiosError, type InternalAxiosRequestConfig } from 'axios';
 import { tokenStore } from './tokenStore';
 
-// Base URL của Backend NestJS - đổi tại đây nếu backend chạy port khác
-export const API_BASE_URL = 'http://localhost:3000';
+// Base URL của Backend NestJS - set VITE_API_URL khi deploy (vd: trên Vercel), mặc định chạy local
+export const API_BASE_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:3000';
 
 export const api = axios.create({
   baseURL: API_BASE_URL,
