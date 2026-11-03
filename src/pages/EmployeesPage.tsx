@@ -7,6 +7,13 @@ import { TableRowSkeleton } from '@/components/common/TableRowSkeleton';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
@@ -16,13 +23,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import {
-  Sheet,
-  SheetContent,
-  SheetFooter,
-  SheetHeader,
-  SheetTitle,
-} from '@/components/ui/sheet';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import {
   actionHoverClass,
@@ -51,7 +51,7 @@ const statusLabel: Record<EmployeeStatus, string> = {
 const PAGE_SIZE = 5;
 const ALL = 'all';
 
-// Trang quản lý Nhân viên: danh sách (Table ở desktop, Card ở mobile) + form Thêm/Sửa trong Sheet
+// Trang quản lý Nhân viên: danh sách (Table ở desktop, Card ở mobile) + form Thêm/Sửa trong Dialog
 export default function EmployeesPage() {
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
@@ -338,11 +338,11 @@ export default function EmployeesPage() {
 
       <DataPagination page={page} totalPages={totalPages} onPageChange={setPage} />
 
-      <Sheet open={open} onOpenChange={setOpen}>
-        <SheetContent className="space-y-4 overflow-y-auto px-6 py-4">
-          <SheetHeader>
-            <SheetTitle>{editing ? 'Sửa nhân viên' : 'Thêm nhân viên'}</SheetTitle>
-          </SheetHeader>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="max-h-[90vh] space-y-4 overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>{editing ? 'Sửa nhân viên' : 'Thêm nhân viên'}</DialogTitle>
+          </DialogHeader>
 
           <div className="space-y-2">
             <Label htmlFor="fullName">Họ tên</Label>
@@ -416,14 +416,14 @@ export default function EmployeesPage() {
             </Select>
           </div>
 
-          <SheetFooter>
+          <DialogFooter>
             <Button onClick={handleSubmit}>Lưu</Button>
             <Button variant="outline" onClick={() => setOpen(false)}>
               Hủy
             </Button>
-          </SheetFooter>
-        </SheetContent>
-      </Sheet>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
