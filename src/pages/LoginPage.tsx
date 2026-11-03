@@ -12,7 +12,7 @@ export default function LoginPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const [email, setEmail] = useState('admin@coralhr.vn');
-  const [password, setPassword] = useState('');
+  const [password, setPassword] = useState('123456');
   const [submitting, setSubmitting] = useState(false);
 
   if (status === 'authenticated') {

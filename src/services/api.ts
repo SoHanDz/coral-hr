@@ -1,60 +1,70 @@
-import axios, { AxiosError, type InternalAxiosRequestConfig } from 'axios';
-import { tokenStore } from './tokenStore';
+import { generateSeed, type MockSnapshot, type MockUser } from './mockData';
 
-// Base URL của Backend NestJS - set VITE_API_URL khi deploy (vd: trên Vercel), mặc định chạy local
-export const API_BASE_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:3000';
+// Backend giả (mock) chạy hoàn toàn trong trình duyệt: dữ liệu lưu ở localStorage,
+// mọi hàm đều trả Promise với độ trễ nhỏ để giống gọi API thật. Không cần server.
 
-export const api = axios.create({
-  baseURL: API_BASE_URL,
-  headers: { 'Content-Type': 'application/json' },
-  // Bắt buộc để browser gửi kèm cookie refreshToken (httpOnly) cho các request sang backend
-  withCredentials: true,
-});
+const DB_KEY = 'coralhr:mock-db:v1';
+const SESSION_KEY = 'coralhr:mock-session:v1';
+const LATENCY_MS = 250;
 
-// Gắn access token vào header Authorization cho mọi request
-api.interceptors.request.use((config) => {
-  const token = tokenStore.get();
-  if (token) config.headers.set('Authorization', `Bearer ${token}`);
-  return config;
-});
+const delay = <T,>(value: T): Promise<T> =>
+  new Promise((resolve) => setTimeout(() => resolve(structuredClone(value)), LATENCY_MS));
 
-// Khi access token hết hạn (401), tự gọi /auth/refresh 1 lần rồi lặp lại request gốc.
-// Nếu refresh cũng thất bại (refresh token hết hạn/không hợp lệ) -> coi như đã đăng xuất.
-let refreshPromise: Promise<string> | null = null;
+const fail = (message: string): Promise<never> =>
+  new Promise((_, reject) => setTimeout(() => reject(new Error(message)), LATENCY_MS));
 
-async function refreshAccessToken(): Promise<string> {
-  const res = await axios.post<{ accessToken: string }>(
-    `${API_BASE_URL}/auth/refresh`,
-    {},
-    { withCredentials: true },
-  );
-  tokenStore.set(res.data.accessToken);
-  return res.data.accessToken;
+let memoryDb: MockSnapshot | null = null;
+
+function loadDb(): MockSnapshot {
+  if (memoryDb) return memoryDb;
+  try {
+    const raw = localStorage.getItem(DB_KEY);
+    if (raw) {
+      memoryDb = JSON.parse(raw) as MockSnapshot;
+      return memoryDb;
+    }
+  } catch {
+    // localStorage không dùng được -> rơi về dữ liệu seed trong bộ nhớ
+  }
+  memoryDb = generateSeed();
+  saveDb();
+  return memoryDb;
 }
 
-api.interceptors.response.use(
-  (res) => res,
-  async (error: AxiosError) => {
-    const originalRequest = error.config as (InternalAxiosRequestConfig & { _retried?: boolean }) | undefined;
-    const isAuthRoute = originalRequest?.url?.startsWith('/auth/');
+function saveDb() {
+  try {
+    if (memoryDb) localStorage.setItem(DB_KEY, JSON.stringify(memoryDb));
+  } catch {
+    // bỏ qua: dữ liệu vẫn còn trong bộ nhớ cho phiên hiện tại
+  }
+}
 
-    if (error.response?.status === 401 && originalRequest && !originalRequest._retried && !isAuthRoute) {
-      originalRequest._retried = true;
-      try {
-        refreshPromise ??= refreshAccessToken().finally(() => {
-          refreshPromise = null;
-        });
-        const newToken = await refreshPromise;
-        originalRequest.headers.set('Authorization', `Bearer ${newToken}`);
-        return api(originalRequest);
-      } catch {
-        tokenStore.notifyAuthFailure();
-      }
-    }
+/** Xoá mọi thay đổi và nạp lại dữ liệu mẫu ban đầu. */
+export function resetMockData() {
+  memoryDb = generateSeed();
+  saveDb();
+}
 
-    return Promise.reject(error);
-  },
-);
+const nextId = (rows: { id: number }[]) => rows.reduce((m, r) => Math.max(m, r.id), 0) + 1;
+
+function readSessionUser(): MockUser | undefined {
+  try {
+    const v = localStorage.getItem(SESSION_KEY);
+    if (!v) return undefined;
+    return loadDb().users.find((u) => u.id === Number(v));
+  } catch {
+    return undefined;
+  }
+}
+
+function writeSession(userId: number | null) {
+  try {
+    if (userId === null) localStorage.removeItem(SESSION_KEY);
+    else localStorage.setItem(SESSION_KEY, String(userId));
+  } catch {
+    // ignore
+  }
+}
 
 // ===== Auth =====
 export interface AuthUser {
@@ -64,19 +74,32 @@ export interface AuthUser {
   role: string;
 }
 
+const toAuthUser = (u: MockUser): AuthUser => ({ id: u.id, email: u.email, fullName: u.fullName, role: u.role });
+
 export const authApi = {
-  login: (email: string, password: string) =>
-    api
-      .post<{ accessToken: string; user: AuthUser }>('/auth/login', { email, password })
-      .then((res) => res.data),
-  // Gọi lúc app khởi động để lấy lại access token từ refresh token (cookie) - không ném lỗi ra ngoài
-  refresh: () =>
-    api.post<{ accessToken: string; user: AuthUser }>('/auth/refresh', {}).then((res) => res.data),
-  logout: () => api.post('/auth/logout', {}).then((res) => res.data),
-  me: () => api.get<AuthUser>('/auth/me').then((res) => res.data),
+  login: (email: string, password: string) => {
+    const user = loadDb().users.find((u) => u.email.toLowerCase() === email.trim().toLowerCase());
+    if (!user || user.password !== password) return fail('Email hoặc mật khẩu không đúng');
+    writeSession(user.id);
+    return delay({ accessToken: `mock-token-${user.id}`, user: toAuthUser(user) });
+  },
+  // Gọi lúc app khởi động để khôi phục phiên đăng nhập
+  refresh: () => {
+    const user = readSessionUser();
+    if (!user) return fail('Chưa đăng nhập');
+    return delay({ accessToken: `mock-token-${user.id}`, user: toAuthUser(user) });
+  },
+  logout: () => {
+    writeSession(null);
+    return delay({ ok: true });
+  },
+  me: () => {
+    const user = readSessionUser();
+    return user ? delay(toAuthUser(user)) : fail('Chưa đăng nhập');
+  },
 };
 
-// ===== Kiểu dữ liệu dùng chung với Backend =====
+// ===== Kiểu dữ liệu =====
 
 export type EmployeeStatus = 'active' | 'inactive';
 export type TimeOffStatus = 'pending' | 'approved' | 'rejected';
@@ -108,35 +131,127 @@ export interface TimeOff {
   employee: Employee;
 }
 
+// ===== Helpers ghép quan hệ =====
+function withDepartment(e: MockSnapshot['employees'][number]): Employee {
+  const department = e.departmentId == null ? null : (loadDb().departments.find((d) => d.id === e.departmentId) ?? null);
+  return { ...e, department };
+}
+
+function withEmployee(t: MockSnapshot['timeOffs'][number]): TimeOff {
+  const emp = loadDb().employees.find((e) => e.id === t.employeeId);
+  return { ...t, employee: withDepartment(emp!) };
+}
+
 // ===== Departments =====
 export const departmentsApi = {
-  getAll: () => api.get<Department[]>('/departments').then((res) => res.data),
-  getOne: (id: number) => api.get<Department>(`/departments/${id}`).then((res) => res.data),
-  create: (data: Partial<Department>) =>
-    api.post<Department>('/departments', data).then((res) => res.data),
-  update: (id: number, data: Partial<Department>) =>
-    api.patch<Department>(`/departments/${id}`, data).then((res) => res.data),
-  remove: (id: number) => api.delete(`/departments/${id}`).then((res) => res.data),
+  getAll: () => delay([...loadDb().departments].sort((a, b) => a.id - b.id)),
+  getOne: (id: number) => {
+    const row = loadDb().departments.find((d) => d.id === id);
+    return row ? delay(row) : fail('Không tìm thấy phòng ban');
+  },
+  create: (data: Partial<Department>) => {
+    const db = loadDb();
+    const row: Department = { id: nextId(db.departments), name: data.name ?? '', description: data.description || null };
+    db.departments.push(row);
+    saveDb();
+    return delay(row);
+  },
+  update: (id: number, data: Partial<Department>) => {
+    const row = loadDb().departments.find((d) => d.id === id);
+    if (!row) return fail('Không tìm thấy phòng ban');
+    Object.assign(row, data, { id });
+    saveDb();
+    return delay(row);
+  },
+  remove: (id: number) => {
+    const db = loadDb();
+    db.departments = db.departments.filter((d) => d.id !== id);
+    // Nhân viên thuộc phòng này trở thành "chưa có phòng ban" (giống ON DELETE SET NULL)
+    db.employees.forEach((e) => {
+      if (e.departmentId === id) e.departmentId = null;
+    });
+    saveDb();
+    return delay({ ok: true });
+  },
 };
 
 // ===== Employees =====
 export const employeesApi = {
-  getAll: () => api.get<Employee[]>('/employees').then((res) => res.data),
-  getOne: (id: number) => api.get<Employee>(`/employees/${id}`).then((res) => res.data),
-  create: (data: Partial<Employee>) =>
-    api.post<Employee>('/employees', data).then((res) => res.data),
-  update: (id: number, data: Partial<Employee>) =>
-    api.patch<Employee>(`/employees/${id}`, data).then((res) => res.data),
-  remove: (id: number) => api.delete(`/employees/${id}`).then((res) => res.data),
+  getAll: () => delay(loadDb().employees.map(withDepartment).sort((a, b) => a.id - b.id)),
+  getOne: (id: number) => {
+    const row = loadDb().employees.find((e) => e.id === id);
+    return row ? delay(withDepartment(row)) : fail('Không tìm thấy nhân viên');
+  },
+  create: (data: Partial<Employee>) => {
+    const db = loadDb();
+    if (db.employees.some((e) => e.email === data.email)) return fail('Email đã tồn tại');
+    const row: MockSnapshot['employees'][number] = {
+      id: nextId(db.employees),
+      fullName: data.fullName ?? '',
+      email: data.email ?? '',
+      phone: data.phone || null,
+      position: data.position || null,
+      status: data.status ?? 'active',
+      departmentId: data.departmentId ?? null,
+    };
+    db.employees.push(row);
+    saveDb();
+    return delay(withDepartment(row));
+  },
+  update: (id: number, data: Partial<Employee>) => {
+    const db = loadDb();
+    const row = db.employees.find((e) => e.id === id);
+    if (!row) return fail('Không tìm thấy nhân viên');
+    if (data.email && db.employees.some((e) => e.id !== id && e.email === data.email)) return fail('Email đã tồn tại');
+    const { department: _department, ...rest } = data;
+    Object.assign(row, rest, { id });
+    saveDb();
+    return delay(withDepartment(row));
+  },
+  remove: (id: number) => {
+    const db = loadDb();
+    db.employees = db.employees.filter((e) => e.id !== id);
+    // Xoá kèm các đơn nghỉ phép của nhân viên (giống ON DELETE CASCADE)
+    db.timeOffs = db.timeOffs.filter((t) => t.employeeId !== id);
+    saveDb();
+    return delay({ ok: true });
+  },
 };
 
 // ===== TimeOffs =====
 export const timeOffsApi = {
-  getAll: () => api.get<TimeOff[]>('/time-offs').then((res) => res.data),
-  getOne: (id: number) => api.get<TimeOff>(`/time-offs/${id}`).then((res) => res.data),
-  create: (data: Partial<TimeOff>) =>
-    api.post<TimeOff>('/time-offs', data).then((res) => res.data),
-  update: (id: number, data: Partial<TimeOff>) =>
-    api.patch<TimeOff>(`/time-offs/${id}`, data).then((res) => res.data),
-  remove: (id: number) => api.delete(`/time-offs/${id}`).then((res) => res.data),
+  getAll: () => delay(loadDb().timeOffs.map(withEmployee).sort((a, b) => a.id - b.id)),
+  getOne: (id: number) => {
+    const row = loadDb().timeOffs.find((t) => t.id === id);
+    return row ? delay(withEmployee(row)) : fail('Không tìm thấy đơn nghỉ phép');
+  },
+  create: (data: Partial<TimeOff>) => {
+    const db = loadDb();
+    if (!db.employees.some((e) => e.id === data.employeeId)) return fail('Nhân viên không tồn tại');
+    const row: MockSnapshot['timeOffs'][number] = {
+      id: nextId(db.timeOffs),
+      employeeId: data.employeeId!,
+      fromDate: data.fromDate ?? '',
+      toDate: data.toDate ?? '',
+      reason: data.reason || null,
+      status: data.status ?? 'pending',
+    };
+    db.timeOffs.push(row);
+    saveDb();
+    return delay(withEmployee(row));
+  },
+  update: (id: number, data: Partial<TimeOff>) => {
+    const row = loadDb().timeOffs.find((t) => t.id === id);
+    if (!row) return fail('Không tìm thấy đơn nghỉ phép');
+    const { employee: _employee, ...rest } = data;
+    Object.assign(row, rest, { id });
+    saveDb();
+    return delay(withEmployee(row));
+  },
+  remove: (id: number) => {
+    const db = loadDb();
+    db.timeOffs = db.timeOffs.filter((t) => t.id !== id);
+    saveDb();
+    return delay({ ok: true });
+  },
 };
